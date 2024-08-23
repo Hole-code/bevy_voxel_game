@@ -1,10 +1,12 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
+use bevy::render::mesh::Indices;
+use bevy::render::render_resource::{PrimitiveTopology, AsBindGroup};
 use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
 
 const CHUNK_SIZE: i32 = 16;
-const RENDER_DISTANCE: i32 = 3;
+const RENDER_DISTANCE: i32 = 5;
 
 #[derive(Component)]
 struct Chunk {
@@ -19,11 +21,19 @@ struct WorldMap {
     chunks: HashMap<IVec3, Vec<Vec<Vec<bool>>>>,
 }
 
+#[derive(AsBindGroup, TypeUuid, Clone)]
+#[uuid = "f690fdae-d598-45ab-8225-97e2a3f056e0"]
+struct ChunkMaterial {
+    #[uniform(0)]
+    color: Color,
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut windows: Query<&mut Window>,
+    asset_server: Res<AssetServer>,
 ) {
     // Камера и игрок
     commands.spawn((
@@ -34,14 +44,32 @@ fn setup(
         Player,
     ));
 
-    // Свет
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 1500.0,
+    // Улучшенное освещение
+    commands.spawn(DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            illuminance: 32000.0,
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
+        transform: Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4)),
+        ..default()
+    });
+
+    commands.spawn(PointLightBundle {
+        point_light: PointLight {
+            intensity: 5000.0,
+            shadows_enabled: true,
+            range: 100.0,
+            ..default()
+        },
+        transform: Transform::from_xyz(0.0, 50.0, 0.0),
+        ..default()
+    });
+
+    // Skybox
+    let skybox_handle = asset_server.load("skybox.png");
+    commands.spawn(SceneBundle {
+        scene: asset_server.load("skybox.gltf#Scene0"),
         ..default()
     });
 
@@ -86,6 +114,7 @@ fn update_visible_chunks(
     chunk_query: Query<(Entity, &Chunk)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     let player_transform = player_query.single();
     let player_chunk = IVec3::new(
@@ -111,12 +140,13 @@ fn update_visible_chunks(
                 if !world_map.chunks.contains_key(&chunk_pos) {
                     let chunk_data = generate_chunk(chunk_pos);
                     world_map.chunks.insert(chunk_pos, chunk_data.clone());
-                    spawn_chunk(&mut commands, &mut meshes, &mut materials, chunk_pos, &chunk_data);
+                    spawn_chunk(&mut commands, &mut meshes, &mut materials, chunk_pos, &chunk_data, &asset_server);
                 }
             }
         }
     }
 }
+
 
 fn spawn_chunk(
     commands: &mut Commands,
@@ -124,11 +154,13 @@ fn spawn_chunk(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     chunk_pos: IVec3,
     chunk_data: &Vec<Vec<Vec<bool>>>,
+    asset_server: &Res<AssetServer>,
 ) {
-    let mut mesh = Mesh::new(bevy::render::render_resource::PrimitiveTopology::TriangleList);
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut normals = Vec::new();
+    let mut uvs = Vec::new();
 
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
@@ -138,6 +170,7 @@ fn spawn_chunk(
                         &mut vertices,
                         &mut indices,
                         &mut normals,
+                        &mut uvs,
                         Vec3::new(x as f32, y as f32, z as f32),
                     );
                 }
@@ -147,12 +180,20 @@ fn spawn_chunk(
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.set_indices(Some(bevy::render::mesh::Indices::U32(indices)));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.set_indices(Some(Indices::U32(indices)));
+
+    let texture_handle = asset_server.load("block_texture.png");
 
     commands.spawn((
         PbrBundle {
             mesh: meshes.add(mesh),
-            material: materials.add(Color::rgb(0.8, 0.7, 0.6).into()),
+            material: materials.add(StandardMaterial {
+                base_color_texture: Some(texture_handle),
+                metallic: 0.0,
+                perceptual_roughness: 1.0,
+                ..default()
+            }),
             transform: Transform::from_xyz(
                 chunk_pos.x as f32 * CHUNK_SIZE as f32,
                 chunk_pos.y as f32 * CHUNK_SIZE as f32,
@@ -168,6 +209,7 @@ fn add_cube_to_mesh(
     vertices: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
     normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
     position: Vec3,
 ) {
     let (x, y, z) = (position.x, position.y, position.z);
@@ -187,6 +229,11 @@ fn add_cube_to_mesh(
         [0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0],
         [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0],
     ];
+    let cube_uvs = [
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+    ];
+    uvs.extend_from_slice(&cube_uvs);
 
     let start_index = vertices.len() as u32;
     vertices.extend_from_slice(&cube_vertices);
@@ -266,13 +313,16 @@ fn player_look(
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(AssetPlugin {
+            watch_for_changes: true,
+            ..default()
+        }))
         .init_resource::<WorldMap>()
         .add_systems(Startup, setup)
         .add_systems(Update, (
             player_movement,
             player_look,
-            update_visible_chunks,
+            update_visible_chunks.with_run_criteria(FixedTimestep::step(0.5)),
         ))
         .run();
 }
